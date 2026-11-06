@@ -9,6 +9,7 @@
 
 # …except these
 !/.gitignore
+!/README.md
 !/SECURITY.md
 !/LICENSE
 
