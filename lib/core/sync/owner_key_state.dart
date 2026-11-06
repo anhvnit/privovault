@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import '../crypto/aead.dart' show sha256;
 import '../db/vault_database.dart';
 import '../db/vault_database_service.dart';
+import '../roles.dart' show OwnerOnlyAccess;
+import '../util/home_currency.dart' show isOfferedBaseCurrency;
 import 'staff_channel.dart' show StaffChannel;
 
 /// Key and channel state every OWNER device must agree on (audit H1).
@@ -33,6 +35,10 @@ import 'staff_channel.dart' show StaffChannel;
 ///    Never cleared.
 ///  * `owner_identity_rotated_at` → ms of the last owner identity rotation
 ///    (monotonic max): staff paired before it must pair again.
+///  * `base_currency` → the vault's base currency (ISO code). Written in
+///    the same transaction as `vault_meta` by [setBaseCurrency], so the row
+///    is the authority: last writer (HLC) wins across owner devices, and
+///    [reconcile] copies it into `vault_meta` (private + shared).
 class OwnerKeyState {
   OwnerKeyState(this.db);
   final VaultDatabase db;
@@ -50,6 +56,7 @@ class OwnerKeyState {
   static String hkId(int epoch, String fp) => 'hk:$epoch:$fp';
   static String revokedDeviceId(String deviceId) => 'odr:${deviceId.toLowerCase()}';
   static const identityRotatedAt = 'owner_identity_rotated_at';
+  static const baseCurrencyId = 'base_currency';
 
   static final _hkRow = RegExp(r'^hk:(\d+):([0-9a-f]{16})$');
   static final _hkMeta = RegExp(r'^household_key_e(\d+)$');
@@ -145,6 +152,21 @@ class OwnerKeyState {
     return {for (final r in rows) r['id']! as String};
   }
 
+  /// Owner: change the vault's base currency. One transaction writes the
+  /// device's working copy (private `vault_meta`), the household-visible
+  /// copy (shared `vault_meta`) and the replicated row that carries the
+  /// change to the owner's other devices. Callers then update the open
+  /// session (VaultSessionController.setBaseCurrency).
+  Future<void> setBaseCurrency(String code) async {
+    if (!db.hasPrivate) throw OwnerOnlyAccess('setBaseCurrency');
+    if (!isOfferedBaseCurrency(code)) throw ArgumentError.value(code, 'code', 'not an offered base currency');
+    await db.transaction((tx) async {
+      await db.setMeta(OwnerMeta.baseCurrency, code, tx: tx);
+      await db.setSharedMeta(SharedMeta.baseCurrency, code, tx: tx);
+      await tx.upsert(table, {'id': baseCurrencyId, 'value': code, 'deleted_at': null});
+    });
+  }
+
   // --------------------------------------------------------- reconcile
 
   /// Two-way reconciliation of this device's `vault_meta` with the
@@ -158,8 +180,8 @@ class OwnerKeyState {
       final meta = <String, String>{
         for (final r in await tx.select(
             "SELECT key, value FROM main.vault_meta WHERE key LIKE 'household_%' OR key LIKE 'staff_%' "
-            'OR key = ? OR key = ?',
-            [_mirrorMeta, identityRotatedAt]))
+            'OR key = ? OR key = ? OR key = ?',
+            [_mirrorMeta, identityRotatedAt, OwnerMeta.baseCurrency]))
           if (r['key'] is String && r['value'] is String) r['key']! as String: r['value']! as String,
       };
       final rows = <String, ({String? value, bool deleted})>{
@@ -297,6 +319,19 @@ class OwnerKeyState {
       }
       final after = jsonEncode(mirror);
       if (after != before) await db.setMeta(_mirrorMeta, after, tx: tx);
+
+      // 5) Base currency: only ever written together with vault_meta
+      //    ([setBaseCurrency]), so the replicated row wins. No row yet
+      //    (never changed since onboarding): every device keeps its own.
+      //    Validated like any value from another device: an ISO-shaped
+      //    code from the offered list, else ignored (local one kept).
+      final currency = live(baseCurrencyId);
+      if (isOfferedBaseCurrency(currency)) {
+        if (meta[OwnerMeta.baseCurrency] != currency) await putMeta(OwnerMeta.baseCurrency, currency!);
+        if (await db.sharedMeta(SharedMeta.baseCurrency, tx: tx) != currency) {
+          await db.setSharedMeta(SharedMeta.baseCurrency, currency!, tx: tx);
+        }
+      }
     });
   }
 }

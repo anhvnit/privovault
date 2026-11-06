@@ -112,6 +112,10 @@ class MergeEngine {
     // (views, triggers, defaults, generated columns) run functions here.
     final prevTrusted = Sqflite.firstIntValue(await raw.rawQuery('PRAGMA trusted_schema'));
     await raw.execute('PRAGMA trusted_schema = OFF');
+    // Extra b-tree cell bounds checks while a foreign file is attached
+    // (a crafted page must fail cleanly, never be walked out of bounds).
+    final prevCellCheck = Sqflite.firstIntValue(await raw.rawQuery('PRAGMA cell_size_check'));
+    await raw.execute('PRAGMA cell_size_check = ON');
     try {
       await raw.execute('ATTACH DATABASE ? AS peer KEY ?', [peerFile.path, rawKeyLiteral(peerSqlcipherKey)]);
       try {
@@ -167,7 +171,10 @@ class MergeEngine {
             final spoofedRole = authority == PeerAuthority.staff && table == 'household_chat' && cols.contains('role')
                 ? "coalesce(p.role, '') IN ('system', 'vault')"
                 : '0';
-            final filter = '($wellFormed) AND p.hlc < $ceiling AND $authorityFilter AND NOT $spoofedRole';
+            // Staff rows must also have the shape the owner's app expects
+            // (types, NOT NULL, bounded text, no bidi overrides).
+            final shape = authority == PeerAuthority.staff ? await _shapeFilter(txn, localSchema, table, cols) : '1';
+            final filter = '($wellFormed) AND p.hlc < $ceiling AND $authorityFilter AND $shape AND NOT $spoofedRole';
 
             // Owner-only columns a staff row can never set or change.
             final forced = <String, String>{
@@ -273,6 +280,7 @@ class MergeEngine {
       }
     } finally {
       if (prevTrusted == 1) await raw.execute('PRAGMA trusted_schema = ON');
+      if (prevCellCheck != 1) await raw.execute('PRAGMA cell_size_check = OFF');
     }
     if (report.peerMaxHlc.isNotEmpty) db.clock.observe(report.peerMaxHlc);
     // Only wake listeners (and the sync debounce) when something changed.
@@ -286,12 +294,22 @@ class MergeEngine {
     final qc = await raw.rawQuery('PRAGMA peer.quick_check(1)');
     if (qc.length != 1 || qc.first.values.first != 'ok') throw PackageMalformed('peer database failed integrity check');
 
-    final objects = await raw.rawQuery('SELECT type, name FROM peer.sqlite_master');
+    final objects = await raw.rawQuery('SELECT type, name, sql FROM peer.sqlite_master');
     final tables = <String>{};
     for (final o in objects) {
       final type = o['type'] as String?;
       if (type == 'trigger' || type == 'view') throw PackageMalformed('unexpected $type in peer database');
-      if (type == 'table') tables.add(o['name']! as String);
+      if (type == 'table') {
+        // A virtual table (fts / rtree / …) runs module code on every read
+        // and its crafted shadow tables are a classic memory-safety attack
+        // surface; our snapshots never contain one.
+        final sql = o['sql'];
+        if (sql is String && sql.trimLeft().toUpperCase().startsWith('CREATE VIRTUAL')) {
+          throw PackageMalformed('unexpected virtual table in peer database');
+        }
+        final name = o['name'];
+        if (name is String) tables.add(name);
+      }
     }
     final expected = tablesOf(scope);
     if (expected.isEmpty || !tables.contains(expected.first) || !tables.contains('vault_meta')) {
@@ -299,7 +317,12 @@ class MergeEngine {
     }
     for (final table in expected) {
       if (!tables.contains(table)) continue; // older peer: table added later
-      final peerCols = {for (final r in await raw.rawQuery('PRAGMA peer.table_info($table)')) r['name']! as String};
+      final xinfo = await raw.rawQuery('PRAGMA peer.table_xinfo($table)');
+      // Generated (or hidden) columns: never part of our layout.
+      if (xinfo.any((r) => (r['hidden'] as int? ?? 0) != 0)) {
+        throw PackageMalformed('peer table $table has generated columns');
+      }
+      final peerCols = {for (final r in xinfo) r['name']! as String};
       if (!peerCols.contains(pkOf(table)) || !peerCols.contains('hlc')) {
         throw PackageMalformed('peer table $table lacks key columns');
       }
@@ -370,6 +393,59 @@ class MergeEngine {
 
   static String _sqlLiteral(String s) => "'${s.replaceAll("'", "''")}'";
 
+  static final _identifier = RegExp(r'^[a-z_][a-z0-9_]{0,63}$');
+
+  /// Longest text value accepted in any column of a staff row (chat body,
+  /// notes, JSON line items included). Anything longer is refused, never
+  /// truncated (truncating would fork the row between the two devices).
+  static const maxStaffTextLength = 16 * 1024;
+
+  /// Integers / reals outside ±10^15 are refused: far beyond any amount in
+  /// minor units, odometer or timestamp in ms, and far from the int64 edge
+  /// where the owner's sums would overflow.
+  static const _maxStaffMagnitude = '1000000000000000';
+
+  /// Bidi embeddings / overrides (U+202A–U+202E): they reorder rendered
+  /// text ("<RLO>000,01" shows as "10,000"). Keyboards never type them.
+  /// Isolates (U+2066–U+2069) are let through: text pasted from messengers
+  /// carries them and they cannot reverse a run; the UI strips them anyway
+  /// (SafeText).
+  static const _bidiGlob = "'*[\u202A-\u202E]*'";
+
+  /// SQL condition (over peer alias `p`) on the VALUES of a staff row, from
+  /// the LOCAL column declarations (never the peer's): a TEXT where the app
+  /// reads an int would crash the owner's screens on every load; a NULL in
+  /// a NOT NULL column would abort the whole merge; a 10 MB note or an
+  /// RTL override would reach the owner's UI, CSV and PDF exports.
+  static Future<String> _shapeFilter(Transaction txn, String localSchema, String table, List<String> cols) async {
+    final info = {
+      for (final r in await txn.rawQuery('PRAGMA $localSchema.table_info($table)')) r['name']! as String: r,
+    };
+    const lo = '-$_maxStaffMagnitude', hi = _maxStaffMagnitude;
+    final parts = <String>[];
+    for (final c in cols) {
+      final r = info[c];
+      if (r == null) continue;
+      final type = ((r['type'] as String?) ?? '').toUpperCase();
+      final notNull = (r['notnull'] as int? ?? 0) != 0 || (r['pk'] as int? ?? 0) != 0;
+      final v = 'p.$c';
+      // SQLite affinity rules (https://sqlite.org/datatype3.html §3.1).
+      final String? typed = type.contains('INT')
+          ? "(typeof($v) = 'integer' AND $v BETWEEN $lo AND $hi)"
+          : (type.contains('CHAR') || type.contains('CLOB') || type.contains('TEXT'))
+              ? "(typeof($v) = 'text' AND length($v) <= $maxStaffTextLength AND $v NOT GLOB $_bidiGlob)"
+              : (type.contains('REAL') || type.contains('FLOA') || type.contains('DOUB'))
+                  ? "(typeof($v) IN ('real', 'integer') AND $v BETWEEN $lo AND $hi)"
+                  : null;
+      if (typed == null) {
+        if (notNull) parts.add('$v IS NOT NULL');
+      } else {
+        parts.add(notNull ? typed : '($v IS NULL OR $typed)');
+      }
+    }
+    return parts.isEmpty ? '1' : parts.join(' AND ');
+  }
+
   /// Columns present in both local and peer table (tolerates older peers).
   static Future<List<String>> _commonColumns(Transaction txn, String localSchema, String table) async {
     final local = [for (final r in await txn.rawQuery('PRAGMA $localSchema.table_info($table)')) r['name']! as String];
@@ -387,8 +463,15 @@ class MergeEngine {
   /// wins everywhere on the next sync.
   Future<void> restoreLoser(Map<String, Object?> conflict, Map<String, Object?> loserRow) =>
       db.transaction((tx) async {
+        // Table and column names end up in SQL text: only names of the
+        // replicated layout (the JSON's values came from a peer).
+        final table = conflict['table_name'];
+        if (table is! String || !(tablesOf(DataScope.shared).contains(table) || tablesOf(DataScope.private).contains(table))) {
+          throw StateError('Unknown conflict table');
+        }
         final row = Map<String, Object?>.of(loserRow)..remove('hlc');
-        await tx.upsert(conflict['table_name']! as String, row);
+        if (row.keys.any((k) => !_identifier.hasMatch(k))) throw StateError('Invalid conflict column');
+        await tx.upsert(table, row);
         await tx.execute('UPDATE main.sync_conflicts SET resolved_at = ? WHERE id = ?',
             [DateTime.now().toUtc().millisecondsSinceEpoch, conflict['id']], {'sync_conflicts'});
       });

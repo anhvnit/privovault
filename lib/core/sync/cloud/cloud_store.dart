@@ -67,6 +67,20 @@ abstract final class CloudLimits {
   static const maxKeyRingBytes = 1024 * 1024;
 }
 
+/// A provider item id (from a listing / metadata response) that is about to
+/// be placed in a request PATH (`/files/<id>`, `/items/<id>`). Real ids are
+/// short tokens (Drive: `[A-Za-z0-9_-]`; OneDrive: `[A-Za-z0-9!]`); anything
+/// with `/`, `?`, `#`, `%`, `..` or other syntax could re-target the
+/// authorised request at another endpoint, so it is refused.
+String safeCloudId(String id) {
+  if (id.isEmpty || id.length > 256 || id.contains('..') || !_cloudId.hasMatch(id)) {
+    throw StateError('Invalid cloud item id');
+  }
+  return id;
+}
+
+final _cloudId = RegExp(r'^[A-Za-z0-9!_.-]+$');
+
 /// A remote file is larger than the cap for its kind; it was not fetched.
 class RemoteTooLarge implements Exception {
   const RemoteTooLarge(this.name, this.size, this.limit);

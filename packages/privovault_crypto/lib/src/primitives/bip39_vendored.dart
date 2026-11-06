@@ -25,7 +25,7 @@ abstract final class Bip39 {
   static bool _validEntropyLength(int n) => n >= 16 && n <= 32 && n % 4 == 0;
 
   /// Synchronous SHA-256 (pure Dart; inputs here are at most 32 bytes).
-  static List<int> _sha256(List<int> data) => DartSha256().hashSync(data).bytes;
+  static List<int> _sha256(List<int> data) => const DartSha256().hashSync(data).bytes;
 
   /// [strengthBits] 128 → 12 words, 256 → 24 words.
   static String generateMnemonic({int strengthBits = 128}) {

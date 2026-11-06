@@ -22,6 +22,9 @@ abstract final class EncryptedRecoveryKit {
   static const _version = 1;
   static const minPasswordLength = 12;
 
+  /// Upper bound on an encrypted kit code accepted by [open].
+  static const maxKitLength = 2048;
+
   /// Argon2id, above the OWASP baseline (m=19 MiB, t=2, p=1): 32 MiB, t=3.
   /// About a second on a phone (release build) — paid once by the owner,
   /// and per guess by an attacker. Parameters are fixed by the kit version.
@@ -54,6 +57,10 @@ abstract final class EncryptedRecoveryKit {
   static Future<({String phrase, String vaultId})> open(String kit, String password) async {
     final t = kit.trim();
     if (!t.startsWith(prefix)) throw const FormatException('Not an encrypted PrivoVault kit');
+    // A real kit is ~250 characters; refuse pasted / scanned junk before
+    // decoding it (the Argon2 cost is fixed by the version, never read
+    // from the kit).
+    if (t.length > maxKitLength) throw const FormatException('Kit code too long');
     var b = t.substring(prefix.length);
     b += '=' * ((4 - b.length % 4) % 4);
     final blob = base64Url.decode(b);

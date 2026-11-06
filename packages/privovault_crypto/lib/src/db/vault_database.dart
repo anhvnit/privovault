@@ -176,7 +176,7 @@ class VaultDatabase implements VaultExecutor {
       if (sharedBehind || privateBehind) {
         await db.close();
         if (sharedBehind) await _migrate(sharedPath, sharedKey, schema.sharedMigrations);
-        if (privateBehind) await _migrate(privatePath!, privateKey!, schema.privateMigrations);
+        if (privateBehind) await _migrate(privatePath, privateKey!, schema.privateMigrations);
         db = await _openMain(sharedPath, sharedKey, privatePath, privateKey);
       }
     } catch (_) {
