@@ -1,0 +1,46 @@
+name: privovault_crypto
+description: >-
+  PrivoVault crypto core — biometric (Face ID / BiometricPrompt) key release
+  and SQLCipher vault initialisation. No UI, no app domain.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Security-critical packages are pinned EXACTLY (supply chain): bump only
+  # deliberately, after reading the changelog, and commit pubspec.lock.
+  # SQLCipher. Apps must NOT also depend on sqflite / sqlite3_flutter_libs.
+  sqflite_sqlcipher: 3.4.1
+  # Biometrics
+  local_auth: 2.3.0
+  # v10: own AES-GCM cipher instead of the deprecated Jetpack
+  # EncryptedSharedPreferences; v9 data is migrated on first access (see
+  # key_release.dart). Keep in step with the app's pubspec.yaml.
+  flutter_secure_storage: ^10.0.0
+  # Crypto (BIP-39 is vendored in lib/src/primitives/bip39_vendored.dart)
+  cryptography: 2.9.0
+  uuid: ^4.5.1
+  # Vault file layout
+  path_provider: ^2.1.5
+  path: ^1.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  # Native half of HardwareBoundKeyRelease (Keychain + Secure Enclave access
+  # control / Android Keystore + BiometricPrompt CryptoObject).
+  plugin:
+    platforms:
+      android:
+        package: com.privovault.crypto
+        pluginClass: PrivovaultCryptoPlugin
+      ios:
+        pluginClass: PrivovaultCryptoPlugin

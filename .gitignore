@@ -1,0 +1,66 @@
+# ============================================================================
+# PUBLIC REPO = cryptography & sync protocol only (for community security review).
+# Everything is ignored by default; only the paths whitelisted below are tracked.
+# To publish another file: add a "!" line for it (and for each parent folder).
+# ============================================================================
+
+# 1. Ignore everything at the root…
+/*
+
+# …except these
+!/.gitignore
+!/SECURITY.md
+!/LICENSE
+
+# 2. Crypto package: primitives, vault handshake, encrypted DB, native key bridges, tests
+!/packages/
+/packages/*
+!/packages/privovault_crypto/
+/packages/privovault_crypto/build/
+/packages/privovault_crypto/.dart_tool/
+/packages/privovault_crypto/pubspec.lock
+/packages/privovault_crypto/android/.gradle/
+/packages/privovault_crypto/android/build/
+/packages/privovault_crypto/ios/Pods/
+/packages/privovault_crypto/**/*.iml
+/packages/privovault_crypto/**/.DS_Store
+
+# 3. App-side crypto helpers
+!/lib/
+/lib/*
+!/lib/core/
+/lib/core/*
+!/lib/core/crypto/
+
+# 4. Sync protocol: package format, signatures, key rings, merge, staff channels
+!/lib/core/sync/
+/lib/core/sync/*
+!/lib/core/sync/package_format.dart
+!/lib/core/sync/signed_marker.dart
+!/lib/core/sync/keyring.dart
+!/lib/core/sync/owner_key_state.dart
+!/lib/core/sync/merge_engine.dart
+!/lib/core/sync/snapshot.dart
+!/lib/core/sync/sync_engine.dart
+!/lib/core/sync/staff_channel.dart
+!/lib/core/sync/staff_revocation.dart
+!/lib/core/sync/cloud/
+/lib/core/sync/cloud/*
+!/lib/core/sync/cloud/cloud_store.dart
+!/lib/core/sync/cloud/household_store.dart
+
+# 5. Security design document
+!/docs/
+/docs/*
+!/docs/ARCHITECTURE.md
+
+# 6. Never, anywhere (defence in depth if a rule above is widened later)
+**/cloud.json
+**/.cloudflare.env
+**/*.jks
+**/*.keystore
+**/key.properties
+**/GoogleService-Info.plist
+**/google-services.json
+**/.env
+**/.env.*
